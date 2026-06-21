@@ -1,0 +1,1812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>ATLAS — Personal Travel Globe</title>
+
+<!-- ============================================================
+     EXTERNAL LIBRARIES — loaded via loadScriptWithFallback() below,
+     not static <script src> tags. Each library is tried against two
+     CDNs in order (jsdelivr, then unpkg) so a single CDN outage
+     doesn't take down the whole app. Any failure is shown on screen
+     instead of failing silently with a blank globe.
+     - three.js: WebGL 3D rendering engine, powers the globe
+     - globe.gl: high-level wrapper around three.js + d3-geo for
+       building data-driven 3D globes (pins, arcs, polygons)
+     - topojson-client: decodes the world country boundary file
+       used to render & highlight visited countries
+============================================================= -->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Inter:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+<style>
+/* ================================================================
+   ROOT TOKENS — design system
+   Deep-space navy base, gold for "visited" state (passport-stamp
+   gold), cyan for active flight arcs, glass panels throughout.
+================================================================= */
+:root{
+  --void:        #050b14;
+  --void-2:      #0a1422;
+  --panel:       rgba(13, 22, 38, 0.55);
+  --panel-solid: #0d1626;
+  --border:      rgba(255,255,255,0.08);
+  --border-hi:   rgba(212,175,55,0.35);
+
+  --gold:        #d4af37;
+  --gold-bright: #f4d35e;
+  --cyan:        #00d9ff;
+  --cyan-dim:    #0891b2;
+  --ember:       #ff6b4a;
+
+  --text:        #eef2f8;
+  --text-dim:    #8b97ab;
+  --text-faint:  #4d586c;
+
+  --font-display: 'Orbitron', sans-serif;
+  --font-body:    'Inter', sans-serif;
+  --font-mono:    'Space Mono', monospace;
+
+  --radius:    18px;
+  --radius-sm: 10px;
+  --blur:      blur(20px) saturate(140%);
+}
+
+/* Light mode override — "daylight atlas" palette */
+:root[data-theme="light"]{
+  --void:        #eef1f6;
+  --void-2:      #e3e8f0;
+  --panel:       rgba(255,255,255,0.6);
+  --panel-solid: #ffffff;
+  --border:      rgba(20,30,50,0.08);
+  --border-hi:   rgba(180,140,30,0.4);
+  --text:        #131a26;
+  --text-dim:    #5b6678;
+  --text-faint:  #9aa3b3;
+}
+
+*{ box-sizing: border-box; }
+html, body{
+  margin:0; padding:0; width:100%; height:100%;
+  background: var(--void);
+  color: var(--text);
+  font-family: var(--font-body);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* subtle starfield vignette behind the globe */
+body::before{
+  content:'';
+  position: fixed; inset:0; z-index:0;
+  background:
+    radial-gradient(ellipse 60% 50% at 50% 40%, rgba(0,217,255,0.06), transparent 70%),
+    radial-gradient(ellipse 80% 80% at 50% 100%, rgba(212,175,55,0.05), transparent 60%);
+  pointer-events:none;
+}
+:root[data-theme="light"] body::before{ opacity:0.4; }
+
+#globeViz{
+  position: fixed; inset:0; z-index:1;
+}
+
+/* ================================================================
+   GLASSMORPHISM PANEL — shared base for every floating UI surface
+================================================================= */
+.glass{
+  background: var(--panel);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow:
+    0 20px 60px -20px rgba(0,0,0,0.5),
+    inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+::-webkit-scrollbar{ width:6px; height:6px; }
+::-webkit-scrollbar-track{ background:transparent; }
+::-webkit-scrollbar-thumb{ background: rgba(212,175,55,0.3); border-radius:10px; }
+::-webkit-scrollbar-thumb:hover{ background: rgba(212,175,55,0.5); }
+
+/* ================================================================
+   TOP BAR — wordmark + global search + theme/mode toggles
+================================================================= */
+.topbar{
+  position:fixed; top:18px; left:18px; right:18px; z-index:30;
+  display:flex; align-items:center; gap:14px;
+  flex-wrap: wrap;
+}
+.brand{
+  display:flex; align-items:center; gap:10px;
+  padding:11px 18px 11px 14px;
+}
+.brand-mark{
+  width:30px; height:30px; border-radius:50%;
+  background: conic-gradient(from 220deg, var(--cyan), var(--gold), var(--ember), var(--cyan));
+  display:flex; align-items:center; justify-content:center;
+  box-shadow: 0 0 18px rgba(0,217,255,0.4);
+  flex-shrink:0;
+  animation: spin-slow 14s linear infinite;
+}
+.brand-mark::after{
+  content:''; width:18px; height:18px; border-radius:50%;
+  background: var(--void-2);
+}
+@keyframes spin-slow{ to{ transform: rotate(360deg); } }
+.brand-text h1{
+  font-family: var(--font-display);
+  font-size: 16px; font-weight:700; letter-spacing: 3px;
+  margin:0; line-height:1;
+}
+.brand-text span{
+  font-family: var(--font-mono); font-size:9px; letter-spacing:2px;
+  color: var(--text-dim); text-transform:uppercase;
+}
+
+.search-wrap{
+  flex:1; min-width:200px; max-width:380px;
+  position:relative;
+}
+.search-input{
+  width:100%; padding:12px 16px 12px 40px;
+  background: var(--panel); backdrop-filter: var(--blur);
+  border:1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); font-family: var(--font-body); font-size:13px;
+  outline:none; transition: border-color .2s, box-shadow .2s;
+}
+.search-input::placeholder{ color: var(--text-faint); }
+.search-input:focus{
+  border-color: var(--border-hi);
+  box-shadow: 0 0 0 3px rgba(212,175,55,0.12);
+}
+.search-icon{
+  position:absolute; left:14px; top:50%; transform:translateY(-50%);
+  width:14px; height:14px; opacity:0.5; pointer-events:none;
+}
+.search-results{
+  position:absolute; top:calc(100% + 6px); left:0; right:0;
+  max-height: 260px; overflow-y:auto;
+  background: var(--panel-solid); border:1px solid var(--border);
+  border-radius: var(--radius-sm); display:none; z-index:40;
+  box-shadow: 0 20px 50px -10px rgba(0,0,0,0.6);
+}
+.search-results.open{ display:block; }
+.search-result-item{
+  padding:10px 14px; cursor:pointer; font-size:13px;
+  display:flex; justify-content:space-between; align-items:center;
+  border-bottom: 1px solid var(--border);
+  transition: background .15s;
+}
+.search-result-item:last-child{ border-bottom:none; }
+.search-result-item:hover{ background: rgba(212,175,55,0.08); }
+.search-result-item .tag{
+  font-family: var(--font-mono); font-size:9px; color: var(--text-faint);
+  text-transform:uppercase; letter-spacing:1px;
+}
+
+.topbar-actions{
+  display:flex; gap:8px; margin-left:auto;
+}
+.icon-btn{
+  width:42px; height:42px; border-radius: var(--radius-sm);
+  background: var(--panel); backdrop-filter: var(--blur);
+  border:1px solid var(--border); color: var(--text);
+  display:flex; align-items:center; justify-content:center;
+  cursor:pointer; transition: all .2s; flex-shrink:0;
+  font-size:16px;
+}
+.icon-btn:hover{ border-color: var(--border-hi); color: var(--gold-bright); transform: translateY(-1px); }
+.icon-btn.active{ border-color: var(--cyan); color: var(--cyan); box-shadow:0 0 14px rgba(0,217,255,0.25); }
+
+/* ================================================================
+   STAT DASHBOARD — top-left cluster of glass stat chips
+================================================================= */
+.dashboard{
+  position:fixed; top:84px; left:18px; z-index:25;
+  display:flex; flex-direction:column; gap:10px;
+  width: 230px;
+}
+.stat-grid{
+  display:grid; grid-template-columns:1fr 1fr; gap:8px;
+}
+.stat-card{
+  padding:14px 14px 12px; position:relative; overflow:hidden;
+}
+.stat-card::before{
+  content:''; position:absolute; top:0; left:0; right:0; height:2px;
+  background: linear-gradient(90deg, var(--gold), transparent);
+}
+.stat-num{
+  font-family: var(--font-display); font-size:24px; font-weight:700;
+  line-height:1; color:var(--text);
+  display:flex; align-items:baseline; gap:3px;
+}
+.stat-num small{ font-size:12px; font-weight:500; color: var(--text-dim); }
+.stat-label{
+  font-family: var(--font-mono); font-size:9px; letter-spacing:1.4px;
+  text-transform:uppercase; color: var(--text-dim); margin-top:5px;
+}
+
+.progress-card{ padding:16px; }
+.progress-head{
+  display:flex; justify-content:space-between; align-items:baseline;
+  margin-bottom:10px;
+}
+.progress-head .pct{
+  font-family: var(--font-display); font-size:20px; color: var(--gold-bright);
+}
+.progress-head .lbl{
+  font-family: var(--font-mono); font-size:9px; letter-spacing:1.4px;
+  text-transform:uppercase; color: var(--text-dim);
+}
+.progress-track{
+  height:6px; border-radius:6px; background: rgba(255,255,255,0.08);
+  overflow:hidden;
+}
+.progress-fill{
+  height:100%; border-radius:6px;
+  background: linear-gradient(90deg, var(--ember), var(--gold), var(--gold-bright));
+  width:0%; transition: width 1.2s cubic-bezier(.16,1,.3,1);
+  box-shadow: 0 0 12px rgba(212,175,55,0.5);
+}
+
+/* ================================================================
+   RIGHT DOCK — mode toggles (visited countries / flight paths)
+================================================================= */
+.right-dock{
+  position:fixed; top:84px; right:18px; z-index:25;
+  display:flex; flex-direction:column; gap:10px; width:200px;
+}
+.dock-toggle{
+  padding:12px 14px; display:flex; align-items:center; justify-content:space-between;
+  cursor:pointer; transition: border-color .2s;
+}
+.dock-toggle:hover{ border-color: var(--border-hi); }
+.dock-toggle-label{ display:flex; align-items:center; gap:9px; }
+.dock-toggle-label .dot{
+  width:7px; height:7px; border-radius:50%; flex-shrink:0;
+}
+.dock-toggle-label span{ font-size:12.5px; font-weight:500; }
+.switch{
+  width:34px; height:19px; border-radius:20px; position:relative;
+  background: rgba(255,255,255,0.12); transition: background .25s; flex-shrink:0;
+}
+.switch::after{
+  content:''; position:absolute; top:2px; left:2px;
+  width:15px; height:15px; border-radius:50%; background:#fff;
+  transition: transform .25s cubic-bezier(.34,1.56,.64,1);
+}
+.switch.on{ background: var(--gold); }
+.switch.on::after{ transform: translateX(15px); }
+
+/* ================================================================
+   BOTTOM TIMELINE DOCK — collapsed trip strip across the bottom
+================================================================= */
+.timeline-dock{
+  position:fixed; bottom:18px; left:18px; right:18px; z-index:25;
+  display:flex; align-items:center; gap:10px;
+}
+.timeline-strip{
+  flex:1; padding:10px 12px; display:flex; gap:10px;
+  overflow-x:auto; scroll-behavior:smooth;
+}
+.timeline-strip::-webkit-scrollbar{ display:none; }
+.trip-chip{
+  flex-shrink:0; padding:9px 14px; border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.04); border:1px solid var(--border);
+  cursor:pointer; transition: all .2s; white-space:nowrap;
+  display:flex; flex-direction:column; gap:2px; min-width:108px;
+}
+.trip-chip:hover{ border-color: var(--border-hi); background: rgba(212,175,55,0.06); transform: translateY(-2px); }
+.trip-chip .city{ font-size:12.5px; font-weight:600; }
+.trip-chip .meta{
+  font-family: var(--font-mono); font-size:9px; color: var(--text-dim);
+  display:flex; align-items:center; gap:5px;
+}
+.trip-chip .stars{ color: var(--gold); letter-spacing:1px; font-size:9px; }
+.empty-strip{
+  font-family: var(--font-mono); font-size:11px; color: var(--text-faint);
+  padding:10px 4px; letter-spacing:0.5px;
+}
+
+.add-pin-btn{
+  width:44px; height:44px; border-radius: var(--radius-sm); flex-shrink:0;
+  background: linear-gradient(135deg, var(--gold), var(--ember));
+  border:none; color:#1a1206; font-size:20px; font-weight:700;
+  cursor:pointer; transition: transform .2s, box-shadow .2s;
+  display:flex; align-items:center; justify-content:center;
+  box-shadow: 0 8px 24px -6px rgba(212,175,55,0.5);
+}
+.add-pin-btn:hover{ transform: scale(1.06) rotate(90deg); box-shadow: 0 10px 30px -4px rgba(212,175,55,0.7); }
+
+/* ================================================================
+   CLICK HINT — first-run instruction toast
+================================================================= */
+.hint-toast{
+  position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+  z-index:50; padding:22px 30px; text-align:center; max-width:320px;
+  pointer-events:none; opacity:1; transition: opacity .6s;
+}
+.hint-toast.hidden{ opacity:0; }
+.hint-toast .ico{ font-size:26px; margin-bottom:8px; }
+.hint-toast p{ margin:0; font-size:13px; color: var(--text-dim); line-height:1.6; }
+.hint-toast strong{ color: var(--gold-bright); font-weight:600; }
+
+/* ================================================================
+   MODAL — pin editor (create / edit a trip)
+================================================================= */
+.modal-overlay{
+  position:fixed; inset:0; z-index:60;
+  background: rgba(2,6,12,0.65); backdrop-filter: blur(6px);
+  display:flex; align-items:center; justify-content:center;
+  opacity:0; pointer-events:none; transition: opacity .25s;
+  padding:20px;
+}
+.modal-overlay.open{ opacity:1; pointer-events:all; }
+.modal{
+  width:100%; max-width:440px; padding:28px;
+  transform: translateY(16px) scale(0.98); transition: transform .25s;
+  max-height: 88vh; overflow-y:auto;
+}
+.modal-overlay.open .modal{ transform: translateY(0) scale(1); }
+.modal-head{
+  display:flex; justify-content:space-between; align-items:flex-start;
+  margin-bottom:20px;
+}
+.modal-head h2{
+  font-family: var(--font-display); font-size:16px; letter-spacing:1.5px;
+  margin:0 0 4px; color: var(--gold-bright);
+}
+.modal-head .sub{ font-family: var(--font-mono); font-size:10px; color: var(--text-faint); letter-spacing:1px; }
+.modal-close{
+  width:30px; height:30px; border-radius:8px; border:1px solid var(--border);
+  background:transparent; color: var(--text-dim); cursor:pointer; font-size:14px;
+  display:flex; align-items:center; justify-content:center; flex-shrink:0;
+}
+.modal-close:hover{ color: var(--text); border-color: var(--border-hi); }
+
+.field{ margin-bottom:16px; }
+.field label{
+  display:block; font-family: var(--font-mono); font-size:10px;
+  letter-spacing:1.3px; text-transform:uppercase; color: var(--text-dim);
+  margin-bottom:7px;
+}
+.field input, .field textarea, .field select{
+  width:100%; padding:11px 13px; border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.04); border:1px solid var(--border);
+  color: var(--text); font-family: var(--font-body); font-size:13.5px;
+  outline:none; transition: border-color .2s; resize:vertical;
+}
+:root[data-theme="light"] .field input,
+:root[data-theme="light"] .field textarea,
+:root[data-theme="light"] .field select{ background: rgba(0,0,0,0.03); }
+.field input:focus, .field textarea:focus, .field select:focus{ border-color: var(--border-hi); }
+.field-row{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+
+.star-picker{ display:flex; gap:6px; }
+.star-picker .star{
+  font-size:24px; cursor:pointer; color: var(--text-faint);
+  transition: color .15s, transform .15s;
+}
+.star-picker .star:hover{ transform: scale(1.15); }
+.star-picker .star.filled{ color: var(--gold); }
+
+.modal-actions{
+  display:flex; gap:10px; margin-top:6px;
+}
+.btn{
+  flex:1; padding:13px; border-radius: var(--radius-sm); border:none;
+  font-family: var(--font-display); font-size:11.5px; letter-spacing:1.5px;
+  cursor:pointer; transition: all .2s; text-transform:uppercase;
+}
+.btn-primary{
+  background: linear-gradient(135deg, var(--gold), var(--gold-bright));
+  color:#1a1206; font-weight:700;
+}
+.btn-primary:hover{ box-shadow: 0 8px 22px -6px rgba(212,175,55,0.55); transform: translateY(-1px); }
+.btn-ghost{
+  background: rgba(255,255,255,0.05); color: var(--text-dim); border:1px solid var(--border);
+}
+.btn-ghost:hover{ color: var(--text); }
+.btn-danger{
+  background: rgba(220,70,70,0.12); color:#ff8585; border:1px solid rgba(220,70,70,0.3);
+}
+.btn-danger:hover{ background: rgba(220,70,70,0.2); }
+
+.coord-readout{
+  font-family: var(--font-mono); font-size:10px; color: var(--text-faint);
+  margin-top:-10px; margin-bottom:16px; letter-spacing:0.5px;
+}
+
+/* ================================================================
+   TIMELINE DRAWER — full chronological list, slides up from bottom
+================================================================= */
+.drawer-overlay{
+  position:fixed; inset:0; z-index:55; background: rgba(2,6,12,0.5);
+  backdrop-filter: blur(4px); opacity:0; pointer-events:none; transition: opacity .25s;
+}
+.drawer-overlay.open{ opacity:1; pointer-events:all; }
+.drawer{
+  position:fixed; bottom:0; left:0; right:0; z-index:56;
+  max-height:72vh; border-radius: 24px 24px 0 0;
+  background: var(--panel-solid); border:1px solid var(--border); border-bottom:none;
+  transform: translateY(100%); transition: transform .35s cubic-bezier(.16,1,.3,1);
+  display:flex; flex-direction:column;
+}
+.drawer.open{ transform: translateY(0); }
+.drawer-handle{
+  width:40px; height:4px; border-radius:4px; background: var(--text-faint);
+  margin:12px auto 4px; opacity:0.5;
+}
+.drawer-head{
+  display:flex; justify-content:space-between; align-items:center;
+  padding:14px 24px; border-bottom:1px solid var(--border);
+}
+.drawer-head h2{
+  font-family: var(--font-display); font-size:15px; letter-spacing:1.5px; margin:0;
+}
+.drawer-sort{
+  display:flex; gap:6px; font-family: var(--font-mono); font-size:10px;
+}
+.sort-btn{
+  padding:6px 11px; border-radius:7px; background: rgba(255,255,255,0.05);
+  border:1px solid var(--border); color: var(--text-dim); cursor:pointer;
+  text-transform:uppercase; letter-spacing:1px;
+}
+.sort-btn.active{ background: rgba(212,175,55,0.15); border-color: var(--border-hi); color: var(--gold-bright); }
+
+.drawer-body{ overflow-y:auto; padding:8px 14px 24px; }
+.trip-row{
+  display:flex; gap:14px; padding:14px 12px; border-radius:14px;
+  cursor:pointer; transition: background .15s; align-items:center;
+}
+.trip-row:hover{ background: rgba(212,175,55,0.06); }
+.trip-row .marker{
+  width:38px; height:38px; border-radius:11px; flex-shrink:0;
+  background: linear-gradient(135deg, rgba(212,175,55,0.18), rgba(0,217,255,0.1));
+  border:1px solid var(--border-hi);
+  display:flex; align-items:center; justify-content:center; font-size:15px;
+}
+.trip-row .info{ flex:1; min-width:0; }
+.trip-row .info .top{ display:flex; align-items:baseline; gap:8px; }
+.trip-row .info .city{ font-weight:600; font-size:14px; }
+.trip-row .info .country{ font-size:11px; color: var(--text-dim); }
+.trip-row .info .notes{
+  font-size:11.5px; color: var(--text-faint); margin-top:3px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.trip-row .right{ text-align:right; flex-shrink:0; }
+.trip-row .date{ font-family: var(--font-mono); font-size:10.5px; color: var(--text-dim); }
+.trip-row .stars{ color: var(--gold); font-size:10px; margin-top:4px; letter-spacing:1px; }
+.drawer-empty{
+  text-align:center; padding:60px 20px; color: var(--text-faint);
+  font-family: var(--font-mono); font-size:12px; line-height:1.8;
+}
+
+/* ================================================================
+   PIN TOOLTIP — globe.gl injects this via getPinLabel
+================================================================= */
+.pin-tip{
+  font-family: var(--font-body); padding:10px 13px; border-radius:10px;
+  background: rgba(10,16,28,0.95); border:1px solid var(--border-hi);
+  color:#fff; font-size:12.5px; box-shadow:0 10px 30px rgba(0,0,0,0.5);
+  max-width:200px;
+}
+.pin-tip b{ font-family: var(--font-display); font-size:12px; letter-spacing:0.5px; }
+.pin-tip .stars{ color: var(--gold); font-size:10px; margin-top:4px; }
+
+/* ================================================================
+   TOAST — small confirmation messages (saved / exported / deleted)
+================================================================= */
+.toast{
+  position:fixed; bottom:90px; left:50%; transform: translateX(-50%) translateY(20px);
+  z-index:70; padding:12px 22px; border-radius:30px;
+  font-family: var(--font-mono); font-size:11.5px; letter-spacing:0.5px;
+  opacity:0; pointer-events:none; transition: all .3s;
+  border:1px solid var(--border-hi);
+}
+.toast.show{ opacity:1; transform: translateX(-50%) translateY(0); }
+
+/* ================================================================
+   RESPONSIVE — tablet & mobile
+================================================================= */
+@media (max-width: 880px){
+  .dashboard{ width: calc(50% - 24px); }
+  .right-dock{ width: calc(50% - 24px); }
+  .stat-grid{ grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 680px){
+  .topbar{ top:12px; left:12px; right:12px; }
+  .brand-text span{ display:none; }
+  .search-wrap{ order:3; flex-basis:100%; max-width:none; }
+  .dashboard{
+    top:auto; bottom:84px; left:12px; right:12px; width:auto;
+    flex-direction:row; gap:8px; overflow-x:auto;
+  }
+  .stat-grid{ display:flex; gap:8px; }
+  .stat-card{ min-width:108px; flex-shrink:0; }
+  .progress-card{ display:none; }
+  .right-dock{ display:none; }
+  .timeline-dock{ bottom:12px; left:12px; right:12px; }
+  .trip-chip{ min-width:90px; }
+  .modal{ max-width: calc(100% - 24px); }
+  .field-row{ grid-template-columns:1fr 1fr; }
+  #nameTitle{ top:170px; }
+}
+@media (max-width: 420px){
+  .stat-num{ font-size:20px; }
+  .add-pin-btn{ width:40px; height:40px; }
+  #nameTitle h2{ font-size:16px; letter-spacing:2px; }
+}
+
+/* reduced motion respect */
+@media (prefers-reduced-motion: reduce){
+  *{ animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+.hidden-util{ display:none !important; }
+</style>
+</head>
+<body data-theme-init>
+
+<!-- ============================================================
+     GLOBE CANVAS MOUNT POINT
+     globe.gl injects its three.js renderer/canvas into this div.
+============================================================= -->
+<div id="globeViz"></div>
+
+<!-- ============================================================
+     PERSONAL NAME TITLE — sits above the globe, purely decorative.
+     pointer-events:none so it never blocks clicking/dragging the
+     globe underneath it; z-index sits above the canvas, below the
+     topbar/dashboard/modals.
+============================================================= -->
+<div id="nameTitle" style="
+  position:fixed; top:120px; left:50%; transform:translateX(-50%);
+  z-index:10; pointer-events:none; text-align:center; width:100%;
+  padding:0 16px;
+">
+  <h2 style="
+    margin:0; font-family:'Orbitron',sans-serif; font-weight:900;
+    font-size:clamp(20px, 4.5vw, 48px); letter-spacing:4px;
+    color:#f4d35e; white-space:nowrap;
+    text-shadow: 0 0 24px rgba(212,175,55,0.45), 0 0 60px rgba(212,175,55,0.2);
+    -webkit-text-stroke: 1px rgba(212,175,55,0.3);
+  ">🦂 DJEFF MERZIER 🦂</h2>
+</div>
+
+<!-- ============================================================
+     LOAD ERROR PANEL — hidden by default, shown by JS if a required
+     library fails to load or the globe fails to initialize. This
+     replaces the previous failure mode (silent blank screen).
+============================================================= -->
+<div id="loadError" class="glass" style="
+  display:none; position:fixed; top:50%; left:50%;
+  transform:translate(-50%,-50%); z-index:90;
+  max-width:420px; padding:28px 30px; text-align:center;">
+  <div style="font-size:28px; margin-bottom:10px;">⚠️</div>
+  <div style="font-family:'Orbitron',sans-serif; font-size:14px; letter-spacing:1.5px; color:#f4d35e; margin-bottom:10px;">
+    GLOBE FAILED TO LOAD
+  </div>
+  <div id="loadErrorDetail" style="font-size:12.5px; color:#8b97ab; line-height:1.7; margin-bottom:16px;">
+    A required script could not be reached.
+  </div>
+  <button id="loadErrorRetry" style="
+    padding:10px 22px; border-radius:10px; border:none; cursor:pointer;
+    background:linear-gradient(135deg,#d4af37,#f4d35e); color:#1a1206;
+    font-family:'Orbitron',sans-serif; font-size:11px; letter-spacing:1.5px; font-weight:700;">
+    RETRY
+  </button>
+</div>
+
+<!-- ============================================================
+     TOP BAR
+============================================================= -->
+<header class="topbar">
+  <div class="brand glass">
+    <div class="brand-mark"></div>
+    <div class="brand-text">
+      <h1>ATLAS</h1>
+      <span>Personal Travel Globe</span>
+    </div>
+  </div>
+
+  <div class="search-wrap">
+    <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+    <input type="text" class="search-input" id="searchInput" placeholder="Search a city or country…" autocomplete="off">
+    <div class="search-results glass" id="searchResults"></div>
+  </div>
+
+  <div class="topbar-actions">
+    <button class="icon-btn" id="timelineBtn" title="Open timeline">🕐</button>
+    <button class="icon-btn" id="themeBtn" title="Toggle day / night">🌙</button>
+    <button class="icon-btn" id="dataBtn" title="Export / import data">⇄</button>
+  </div>
+</header>
+
+<!-- ============================================================
+     LEFT DASHBOARD — live stats
+============================================================= -->
+<aside class="dashboard">
+  <div class="stat-grid">
+    <div class="stat-card glass">
+      <div class="stat-num" id="statCountries">0</div>
+      <div class="stat-label">Countries</div>
+    </div>
+    <div class="stat-card glass">
+      <div class="stat-num" id="statCities">0</div>
+      <div class="stat-label">Cities</div>
+    </div>
+    <div class="stat-card glass">
+      <div class="stat-num" id="statContinents">0<small>/7</small></div>
+      <div class="stat-label">Continents</div>
+    </div>
+    <div class="stat-card glass">
+      <div class="stat-num" id="statTrips">0</div>
+      <div class="stat-label">Total Trips</div>
+    </div>
+  </div>
+
+  <div class="stat-card glass" style="grid-column:1/-1;">
+    <div class="stat-num" id="statMiles">0<small>mi</small></div>
+    <div class="stat-label">Est. Distance Traveled</div>
+  </div>
+
+  <div class="progress-card glass">
+    <div class="progress-head">
+      <span class="lbl">World Explored</span>
+      <span class="pct" id="worldPct">0%</span>
+    </div>
+    <div class="progress-track"><div class="progress-fill" id="worldFill"></div></div>
+  </div>
+</aside>
+
+<!-- ============================================================
+     RIGHT DOCK — display mode toggles
+============================================================= -->
+<aside class="right-dock">
+  <div class="dock-toggle glass" id="toggleVisited">
+    <div class="dock-toggle-label">
+      <span class="dot" style="background:var(--gold); box-shadow:0 0 8px var(--gold);"></span>
+      <span>Visited Countries</span>
+    </div>
+    <div class="switch on" id="switchVisited"></div>
+  </div>
+  <div class="dock-toggle glass" id="toggleArcs">
+    <div class="dock-toggle-label">
+      <span class="dot" style="background:var(--cyan); box-shadow:0 0 8px var(--cyan);"></span>
+      <span>Flight Paths</span>
+    </div>
+    <div class="switch on" id="switchArcs"></div>
+  </div>
+  <div class="dock-toggle glass" id="toggleAutorotate">
+    <div class="dock-toggle-label">
+      <span class="dot" style="background:var(--ember); box-shadow:0 0 8px var(--ember);"></span>
+      <span>Auto-Rotate</span>
+    </div>
+    <div class="switch on" id="switchAutorotate"></div>
+  </div>
+</aside>
+
+<!-- ============================================================
+     FIRST-RUN HINT
+============================================================= -->
+<div class="hint-toast glass" id="hintToast">
+  <div class="ico">🌍</div>
+  <p><strong>Click anywhere</strong> on the globe to drop your first travel pin — or use the <strong>+</strong> button below.</p>
+</div>
+
+<!-- ============================================================
+     BOTTOM TIMELINE STRIP + ADD BUTTON
+============================================================= -->
+<div class="timeline-dock">
+  <div class="timeline-strip glass" id="timelineStrip">
+    <span class="empty-strip">No trips logged yet — your journey starts here ✈️</span>
+  </div>
+  <button class="add-pin-btn" id="addPinBtn" title="Add a trip manually">+</button>
+</div>
+
+<!-- ============================================================
+     PIN EDITOR MODAL
+============================================================= -->
+<div class="modal-overlay" id="pinModalOverlay">
+  <div class="modal glass">
+    <div class="modal-head">
+      <div>
+        <h2 id="modalTitle">New Travel Pin</h2>
+        <span class="sub" id="modalSub">PLACE A MARKER ON YOUR MAP</span>
+      </div>
+      <button class="modal-close" id="modalClose">✕</button>
+    </div>
+
+    <div class="coord-readout" id="coordReadout">lat 0.0000, lng 0.0000</div>
+
+    <form id="pinForm">
+      <div class="field-row">
+        <div class="field">
+          <label>City</label>
+          <input type="text" id="fieldCity" placeholder="Lisbon" required>
+        </div>
+        <div class="field">
+          <label>Country</label>
+          <input type="text" id="fieldCountry" placeholder="Portugal" required>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Date Visited</label>
+        <input type="date" id="fieldDate">
+      </div>
+
+      <div class="field">
+        <label>Rating</label>
+        <div class="star-picker" id="starPicker">
+          <span class="star" data-val="1">★</span>
+          <span class="star" data-val="2">★</span>
+          <span class="star" data-val="3">★</span>
+          <span class="star" data-val="4">★</span>
+          <span class="star" data-val="5">★</span>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Notes</label>
+        <textarea id="fieldNotes" rows="3" placeholder="What made this trip memorable…"></textarea>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-danger hidden-util" id="deletePinBtn">Delete</button>
+        <button type="button" class="btn btn-ghost" id="cancelPinBtn">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save Pin</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============================================================
+     TIMELINE DRAWER (full list)
+============================================================= -->
+<div class="drawer-overlay" id="drawerOverlay"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-handle"></div>
+  <div class="drawer-head">
+    <h2>Travel Timeline</h2>
+    <div class="drawer-sort">
+      <span class="sort-btn active" data-sort="desc">Newest</span>
+      <span class="sort-btn" data-sort="asc">Oldest</span>
+      <span class="sort-btn" data-sort="rating">Top Rated</span>
+    </div>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</div>
+
+<!-- ============================================================
+     DATA EXPORT / IMPORT MODAL
+============================================================= -->
+<div class="modal-overlay" id="dataModalOverlay">
+  <div class="modal glass" style="max-width:380px;">
+    <div class="modal-head">
+      <div>
+        <h2>Backup &amp; Restore</h2>
+        <span class="sub">YOUR DATA, YOUR FILE</span>
+      </div>
+      <button class="modal-close" id="dataModalClose">✕</button>
+    </div>
+    <p style="font-size:12.5px; color:var(--text-dim); line-height:1.7; margin-top:0;">
+      Everything is stored locally in this browser. Export a backup file regularly, or
+      import one to restore your travel history on another device.
+    </p>
+    <div class="modal-actions" style="margin-top:18px;">
+      <button class="btn btn-ghost" id="importBtn">Import JSON</button>
+      <button class="btn btn-primary" id="exportBtn">Export JSON</button>
+    </div>
+    <input type="file" id="importFileInput" accept=".json" class="hidden-util">
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* =====================================================================
+   ATLAS — Personal Travel Globe
+   Single-purpose JS engine: data model + Globe.gl rendering + UI wiring.
+   Organized top-to-bottom in the order things actually run:
+
+     1. CONSTANTS & STATE
+     2. DATA LAYER (localStorage persistence)
+     3. GEO HELPERS (distance, continent lookup, country name matching)
+     4. GLOBE INITIALIZATION (globe.gl + three.js setup)
+     5. RENDER FUNCTIONS (pins, arcs, countries, dashboard, timeline)
+     6. UI WIRING (modals, search, toggles, drawer, import/export)
+     7. BOOTSTRAP
+===================================================================== */
+
+(() => {
+  'use strict';
+
+  /* ===================================================================
+     0. RESILIENT LIBRARY LOADER
+     Loads three.js, globe.gl, and topojson-client from a primary CDN,
+     falling back to a secondary CDN if the first fails (timeout or
+     network error). If every source for a library fails, we throw a
+     descriptive error that boot() catches and displays on screen,
+     instead of leaving the user looking at a blank globe with no
+     explanation.
+  =================================================================== */
+
+  const LIBRARIES = [
+    {
+      name: 'three.js',
+      globalCheck: () => typeof THREE !== 'undefined',
+      sources: [
+        'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js',
+        'https://unpkg.com/three@0.160.0/build/three.min.js'
+      ]
+    },
+    {
+      name: 'globe.gl',
+      globalCheck: () => typeof Globe !== 'undefined',
+      sources: [
+        'https://cdn.jsdelivr.net/npm/globe.gl@2.31.0/dist/globe.gl.min.js',
+        'https://unpkg.com/globe.gl@2.31.0/dist/globe.gl.min.js'
+      ]
+    },
+    {
+      name: 'topojson-client',
+      globalCheck: () => typeof topojson !== 'undefined',
+      sources: [
+        'https://cdn.jsdelivr.net/npm/topojson-client@3',
+        'https://unpkg.com/topojson-client@3'
+      ]
+    }
+  ];
+
+  function loadScriptOnce(src, timeoutMs = 9000) {
+    return new Promise((resolve, reject) => {
+      const tag = document.createElement('script');
+      tag.src = src;
+      const timer = setTimeout(() => {
+        tag.remove();
+        reject(new Error(`timed out loading ${src}`));
+      }, timeoutMs);
+      tag.onload = () => { clearTimeout(timer); resolve(); };
+      tag.onerror = () => { clearTimeout(timer); tag.remove(); reject(new Error(`failed to load ${src}`)); };
+      document.head.appendChild(tag);
+    });
+  }
+
+  // Tries each library's sources in order until one succeeds (checked
+  // both by the script actually loading AND the expected global symbol
+  // existing afterward — a host can return 200 with garbage/redirect
+  // HTML, so the global check is the real proof it worked).
+  async function loadAllLibraries() {
+    for (const lib of LIBRARIES) {
+      if (lib.globalCheck()) continue; // already present somehow, skip
+
+      let lastError = null;
+      let succeeded = false;
+      for (const src of lib.sources) {
+        try {
+          await loadScriptOnce(src);
+          if (lib.globalCheck()) { succeeded = true; break; }
+          lastError = new Error(`${src} loaded but ${lib.name} global was not defined afterward`);
+        } catch (e) {
+          lastError = e;
+        }
+      }
+      if (!succeeded) {
+        throw new Error(`Could not load ${lib.name} from any source. ${lastError ? lastError.message : ''}`);
+      }
+    }
+  }
+
+  function showLoadError(message) {
+    const panel = document.getElementById('loadError');
+    const detail = document.getElementById('loadErrorDetail');
+    if (detail) detail.textContent = message;
+    if (panel) panel.style.display = 'block';
+  }
+
+  function hideLoadError() {
+    const panel = document.getElementById('loadError');
+    if (panel) panel.style.display = 'none';
+  }
+
+
+  /* ===================================================================
+     1. CONSTANTS & STATE
+  =================================================================== */
+
+  const STORAGE_KEY = 'atlas_travel_globe_v1';
+  const THEME_KEY   = 'atlas_theme';
+
+  // (world boundary CDN sources moved next to loadWorldGeography(), below,
+  // alongside the rest of the resilient-fetch pattern used throughout)
+
+  // Rough continent membership by ISO A2-ish country names — used only
+  // for the "continents visited" stat and search tagging. Doesn't need
+  // to be exhaustive, just cover commonly-visited countries well.
+  const CONTINENT_MAP = {
+    'United States of America':'North America','United States':'North America','Canada':'North America','Mexico':'North America',
+    'Panama':'North America','Costa Rica':'North America','Cuba':'North America','Jamaica':'North America','Dominican Rep.':'North America',
+    'Dominican Republic':'North America','Guatemala':'North America','Honduras':'North America','Belize':'North America','Nicaragua':'North America',
+    'El Salvador':'North America','Bahamas':'North America','Haiti':'North America',
+
+    'Colombia':'South America','Brazil':'South America','Argentina':'South America','Chile':'South America','Peru':'South America',
+    'Venezuela':'South America','Ecuador':'South America','Bolivia':'South America','Paraguay':'South America','Uruguay':'South America','Guyana':'South America',
+
+    'United Kingdom':'Europe','France':'Europe','Germany':'Europe','Spain':'Europe','Italy':'Europe','Portugal':'Europe',
+    'Netherlands':'Europe','Belgium':'Europe','Switzerland':'Europe','Austria':'Europe','Greece':'Europe','Ireland':'Europe',
+    'Sweden':'Europe','Norway':'Europe','Denmark':'Europe','Finland':'Europe','Poland':'Europe','Czechia':'Europe','Czech Rep.':'Europe',
+    'Hungary':'Europe','Croatia':'Europe','Iceland':'Europe','Romania':'Europe','Turkey':'Europe','Russia':'Europe','Ukraine':'Europe',
+    'Monaco':'Europe','Luxembourg':'Europe', 'Malta':'Europe',
+
+    'Japan':'Asia','China':'Asia','South Korea':'Asia','Korea':'Asia','Thailand':'Asia','Vietnam':'Asia','Singapore':'Asia',
+    'Indonesia':'Asia','Malaysia':'Asia','Philippines':'Asia','India':'Asia','United Arab Emirates':'Asia','Israel':'Asia',
+    'Cambodia':'Asia','Laos':'Asia','Sri Lanka':'Asia','Nepal':'Asia','Qatar':'Asia','Saudi Arabia':'Asia','Jordan':'Asia',
+
+    'Egypt':'Africa','Morocco':'Africa','South Africa':'Africa','Kenya':'Africa','Tanzania':'Africa','Nigeria':'Africa',
+    'Ethiopia':'Africa','Ghana':'Africa','Tunisia':'Africa','Senegal':'Africa','Namibia':'Africa', "Côte d'Ivoire":'Africa',
+
+    'Australia':'Oceania','New Zealand':'Oceania','Fiji':'Oceania',
+
+    'Antarctica':'Antarctica'
+  };
+
+  // In-memory app state. `pins` is the single source of truth; every
+  // render function below derives from it, and it's persisted on every
+  // mutation. `meta.visitedCountries` is a derived Set rebuilt whenever
+  // pins change (kept on state for convenience access).
+  const state = {
+    pins: [],                 // [{id, lat, lng, city, country, date, notes, rating}]
+    worldFeatures: [],         // GeoJSON country features once loaded
+    visitedCountryNames: new Set(),
+    showVisited: true,
+    showArcs: true,
+    autoRotate: true,
+    pendingCoord: null,        // {lat,lng} captured on globe click, before save
+    trackedCameraLat: 18,       // kept in sync every ~150ms from the three.js
+    trackedCameraLng: 10,       // camera itself — see updateTrackedCameraLatLng()
+    editingId: null,           // pin id currently open in the editor, or null = new
+    sortMode: 'desc',
+    theme: 'dark'
+  };
+
+  let globe; // globe.gl instance, assigned in initGlobe()
+
+
+  /* ===================================================================
+     2. DATA LAYER — localStorage persistence
+  =================================================================== */
+
+  function loadPins() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed.pins) ? parsed.pins : [];
+    } catch (e) {
+      console.warn('Atlas: could not read saved trips, starting fresh.', e);
+      return [];
+    }
+  }
+
+  function savePins() {
+    const payload = { version: 1, savedAt: new Date().toISOString(), pins: state.pins };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  }
+
+  function loadTheme() {
+    return localStorage.getItem(THEME_KEY) || 'dark';
+  }
+
+  function saveTheme(theme) {
+    localStorage.setItem(THEME_KEY, theme);
+  }
+
+  function uid() {
+    return 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+
+
+  /* ===================================================================
+     3. GEO HELPERS
+  =================================================================== */
+
+  // Haversine distance in miles — used to sum "estimated miles traveled"
+  // across consecutive trips in chronological order.
+  function haversineMiles(lat1, lon1, lat2, lon2) {
+    const R = 3958.8; // Earth radius, miles
+    const toRad = d => d * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 +
+              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  function continentFor(countryName) {
+    return CONTINENT_MAP[countryName] || null;
+  }
+
+  // Point-in-polygon test against a country's GeoJSON geometry — lets us
+  // figure out which country a raw lat/lng click landed in in the case
+  // the user didn't type a country name (kept simple: ray-casting on the
+  // outer ring, good enough for landmass-scale lookups, not coastlines).
+  function countryAtPoint(lat, lng) {
+    for (const feature of state.worldFeatures) {
+      if (pointInGeometry(lat, lng, feature.geometry)) {
+        return feature.properties.name || feature.properties.ADMIN || null;
+      }
+    }
+    return null;
+  }
+
+  function pointInGeometry(lat, lng, geometry) {
+    if (!geometry) return false;
+    const rings = geometry.type === 'Polygon' ? [geometry.coordinates]
+                : geometry.type === 'MultiPolygon' ? geometry.coordinates
+                : [];
+    for (const polygon of rings) {
+      const outer = polygon[0];
+      if (rayCast(lng, lat, outer)) return true;
+    }
+    return false;
+  }
+
+  function rayCast(x, y, ring) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i];
+      const [xj, yj] = ring[j];
+      const intersect = ((yi > y) !== (yj > y)) &&
+        (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  // Normalizes a country string for matching against GeoJSON ADMIN/name
+  // fields, which use slightly different naming than what a person types
+  // (e.g. "USA" vs "United States of America").
+  const COUNTRY_ALIASES = {
+    'usa':'United States of America','us':'United States of America','united states':'United States of America',
+    'uk':'United Kingdom','great britain':'United Kingdom','england':'United Kingdom',
+    'uae':'United Arab Emirates','south korea':'South Korea','korea':'South Korea',
+    'czech republic':'Czechia', 'netherlands':'Netherlands','holland':'Netherlands',
+  };
+  function normalizeCountryName(name) {
+    if (!name) return '';
+    const key = name.trim().toLowerCase();
+    return COUNTRY_ALIASES[key] || name.trim();
+  }
+
+
+  /* ===================================================================
+     4. GLOBE INITIALIZATION
+  =================================================================== */
+
+  async function initGlobe() {
+    const el = document.getElementById('globeViz');
+
+    globe = Globe()
+      .width(window.innerWidth)
+      .height(window.innerHeight)
+      // Night-Earth texture: city lights glowing on the dark side, giving
+      // the "Google-Earth-at-night" look requested.
+      .globeImageUrl('https://unpkg.com/three-globe/example/img/earth-night.jpg')
+      .bumpImageUrl('https://unpkg.com/three-globe/example/img/earth-topology.png')
+      .backgroundColor('rgba(0,0,0,0)')
+      .showAtmosphere(true)
+      .atmosphereColor('#3a8fd4')
+      .atmosphereAltitude(0.22)
+
+      // ---- PIN LAYER (point of interest markers) ----
+      .pointsData(state.pins)
+      .pointLat('lat')
+      .pointLng('lng')
+      .pointColor(d => ratingColor(d.rating))
+      .pointAltitude(0.012)
+      .pointRadius(0.45)
+      .pointLabel(pinTooltipHtml)
+      .onPointClick(pin => openPinEditor(pin))
+
+      // ---- COUNTRY POLYGON LAYER (visited highlight) ----
+      .polygonsData([])
+      .polygonCapColor(d => state.visitedCountryNames.has(d.properties.name)
+        ? 'rgba(212,175,55,0.55)'
+        : 'rgba(255,255,255,0.02)')
+      .polygonSideColor(() => 'rgba(0,0,0,0)')
+      .polygonStrokeColor(() => 'rgba(212,175,55,0.25)')
+      .polygonAltitude(d => state.visitedCountryNames.has(d.properties.name) ? 0.006 : 0.001)
+      .polygonsTransitionDuration(400)
+      .polygonLabel(d => {
+        const name = d.properties.name;
+        const visited = state.visitedCountryNames.has(name);
+        return `<div class="pin-tip"><b>${name}</b><br><span style="color:${visited ? 'var(--gold-bright)' : 'var(--text-faint)'}">${visited ? '✓ Visited' : 'Not yet visited'}</span></div>`;
+      })
+
+      // ---- FLIGHT ARC LAYER ----
+      .arcsData([])
+      .arcStartLat('startLat').arcStartLng('startLng')
+      .arcEndLat('endLat').arcEndLng('endLng')
+      .arcColor(() => ['rgba(0,217,255,0.85)', 'rgba(212,175,55,0.85)'])
+      .arcAltitudeAutoScale(0.35)
+      .arcStroke(0.5)
+      .arcDashLength(0.4)
+      .arcDashGap(0.15)
+      .arcDashAnimateTime(2600)
+
+      .onGlobeClick(({ lat, lng }) => handleGlobeClick(lat, lng));
+
+    globe(el);
+
+    // camera framing + auto-rotate
+    globe.pointOfView({ lat: 18, lng: 10, altitude: 2.3 }, 0);
+    const controls = globe.controls();
+    controls.autoRotate = state.autoRotate;
+    controls.autoRotateSpeed = 0.35;
+    controls.enableDamping = true;
+
+    // ---- LIVE CAMERA TRACKING (independent of pointOfView() getter) ----
+    // pointOfView() with no arguments is documented and used throughout
+    // the library's own examples purely as a SETTER pattern; relying on
+    // it to read back the camera's live, auto-rotated position produced
+    // wrong coordinates (pins landing near 0,0 in the ocean instead of
+    // the actual viewed location). Instead we derive lat/lng ourselves,
+    // every frame, directly from the three.js camera's world position —
+    // this is plain spherical-coordinate math with no library-specific
+    // assumptions, so it can't drift out of sync with what's on screen.
+    const camera = globe.camera();
+    function updateTrackedCameraLatLng() {
+      const v = camera.position.clone().normalize();
+      // three-globe's convention: Y is the polar axis, Z/X form the
+      // equatorial plane, with longitude 0 facing +Z.
+      state.trackedCameraLat = Math.asin(v.y) * (180 / Math.PI);
+      state.trackedCameraLng = Math.atan2(v.x, v.z) * (180 / Math.PI);
+    }
+    updateTrackedCameraLatLng();
+
+    // Globe.gl/three-globe doesn't expose a per-frame hook directly, so
+    // we piggy-back on requestAnimationFrame at a light interval — cheap
+    // (two trig calls) and only used when the + button is pressed, not
+    // for rendering.
+    setInterval(updateTrackedCameraLatLng, 150);
+
+    window.addEventListener('resize', () => {
+      globe.width(window.innerWidth).height(window.innerHeight);
+    });
+
+    await loadWorldGeography();
+    renderAll();
+  }
+
+  function ratingColor(rating) {
+    // Gold scale: dimmer for unrated/low, brighter + warmer for 5-star
+    const palette = ['#8b97ab', '#9aa86a', '#c9b94a', '#d4af37', '#f4d35e', '#ffefa8'];
+    return palette[rating || 0] || palette[3];
+  }
+
+  function pinTooltipHtml(pin) {
+    const stars = '★'.repeat(pin.rating || 0) + '☆'.repeat(5 - (pin.rating || 0));
+    return `<div class="pin-tip">
+      <b>${escapeHtml(pin.city)}</b><br>
+      <span style="color:var(--text-dim,#8b97ab)">${escapeHtml(pin.country)}</span>
+      <div class="stars">${stars}</div>
+    </div>`;
+  }
+
+  const WORLD_GEOJSON_SOURCES = [
+    'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json',
+    'https://unpkg.com/world-atlas@2.0.2/countries-110m.json'
+  ];
+
+  async function loadWorldGeography() {
+    for (const url of WORLD_GEOJSON_SOURCES) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const topology = await res.json();
+        const geoData = topojson.feature(topology, topology.objects.countries);
+        state.worldFeatures = geoData.features;
+        globe.polygonsData(state.worldFeatures);
+        return;
+      } catch (e) {
+        continue;
+      }
+    }
+    console.warn('Atlas: world country boundaries could not be loaded from any source — visited-country highlighting will be unavailable this session.');
+    flashToast('Country borders unavailable — pins still work, highlighting disabled');
+  }
+
+  function handleGlobeClick(lat, lng) {
+    state.pendingCoord = { lat, lng };
+    state.editingId = null;
+    openPinEditor(null, { lat, lng });
+  }
+
+
+  /* ===================================================================
+     5. RENDER FUNCTIONS
+  =================================================================== */
+
+  function renderAll() {
+    recomputeVisitedCountries();
+    renderGlobeLayers();
+    renderDashboard();
+    renderTimelineStrip();
+    renderTimelineDrawer();
+    toggleHint();
+  }
+
+  function recomputeVisitedCountries() {
+    state.visitedCountryNames = new Set(
+      state.pins.map(p => normalizeCountryName(p.country)).filter(Boolean)
+    );
+  }
+
+  function renderGlobeLayers() {
+    if (!globe) return;
+
+    globe.pointsData(state.pins);
+
+    // re-apply cap color fn so it re-reads the (possibly updated) Set
+    globe.polygonCapColor(d => state.showVisited && state.visitedCountryNames.has(d.properties.name)
+      ? 'rgba(212,175,55,0.55)'
+      : 'rgba(255,255,255,0.02)');
+    globe.polygonAltitude(d => state.showVisited && state.visitedCountryNames.has(d.properties.name) ? 0.006 : 0.001);
+
+    // Arcs: connect consecutive trips in chronological order, forming a
+    // visual "route taken" across the dates logged.
+    const sorted = [...state.pins].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    const arcs = [];
+    for (let i = 0; i < sorted.length - 1; i++) {
+      arcs.push({
+        startLat: sorted[i].lat, startLng: sorted[i].lng,
+        endLat: sorted[i + 1].lat, endLng: sorted[i + 1].lng
+      });
+    }
+    globe.arcsData(state.showArcs ? arcs : []);
+  }
+
+  function renderDashboard() {
+    const countries = state.visitedCountryNames.size;
+    const cities = new Set(state.pins.map(p => `${p.city}|${p.country}`.toLowerCase())).size;
+    const continents = new Set(
+      [...state.visitedCountryNames].map(continentFor).filter(Boolean)
+    ).size;
+    const trips = state.pins.length;
+    const miles = estimateMiles();
+
+    setText('statCountries', countries);
+    setText('statCities', cities);
+    document.getElementById('statContinents').innerHTML = `${continents}<small>/7</small>`;
+    setText('statTrips', trips);
+    document.getElementById('statMiles').innerHTML = `${miles.toLocaleString()}<small>mi</small>`;
+
+    // ~195 widely-recognized sovereign states, used as the denominator
+    // for the "world explored" percentage.
+    const pct = Math.min(100, Math.round((countries / 195) * 100));
+    document.getElementById('worldPct').textContent = pct + '%';
+    document.getElementById('worldFill').style.width = pct + '%';
+  }
+
+  function estimateMiles() {
+    const sorted = [...state.pins].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    let total = 0;
+    for (let i = 0; i < sorted.length - 1; i++) {
+      total += haversineMiles(sorted[i].lat, sorted[i].lng, sorted[i + 1].lat, sorted[i + 1].lng);
+    }
+    return Math.round(total);
+  }
+
+  function renderTimelineStrip() {
+    const strip = document.getElementById('timelineStrip');
+    if (state.pins.length === 0) {
+      strip.innerHTML = `<span class="empty-strip">No trips logged yet — your journey starts here ✈️</span>`;
+      return;
+    }
+    const sorted = [...state.pins].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    strip.innerHTML = sorted.map(p => `
+      <div class="trip-chip" data-id="${p.id}">
+        <div class="city">${escapeHtml(p.city)}</div>
+        <div class="meta">
+          <span>${escapeHtml(p.country)}</span>
+        </div>
+        <div class="stars">${'★'.repeat(p.rating || 0)}${'☆'.repeat(5 - (p.rating || 0))}</div>
+      </div>
+    `).join('');
+
+    strip.querySelectorAll('.trip-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const pin = state.pins.find(p => p.id === chip.dataset.id);
+        if (pin) focusOnPin(pin);
+      });
+    });
+  }
+
+  function renderTimelineDrawer() {
+    const body = document.getElementById('drawerBody');
+    if (state.pins.length === 0) {
+      body.innerHTML = `<div class="drawer-empty">No trips yet.<br>Click the globe to log your first destination.</div>`;
+      return;
+    }
+
+    let sorted = [...state.pins];
+    if (state.sortMode === 'desc') sorted.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    else if (state.sortMode === 'asc') sorted.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    else if (state.sortMode === 'rating') sorted.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+
+    body.innerHTML = sorted.map(p => `
+      <div class="trip-row" data-id="${p.id}">
+        <div class="marker">📍</div>
+        <div class="info">
+          <div class="top">
+            <span class="city">${escapeHtml(p.city)}</span>
+            <span class="country">${escapeHtml(p.country)}</span>
+          </div>
+          ${p.notes ? `<div class="notes">${escapeHtml(p.notes)}</div>` : ''}
+        </div>
+        <div class="right">
+          <div class="date">${formatDate(p.date)}</div>
+          <div class="stars">${'★'.repeat(p.rating || 0)}${'☆'.repeat(5 - (p.rating || 0))}</div>
+        </div>
+      </div>
+    `).join('');
+
+    body.querySelectorAll('.trip-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const pin = state.pins.find(p => p.id === row.dataset.id);
+        if (pin) {
+          closeDrawer();
+          openPinEditor(pin);
+        }
+      });
+    });
+  }
+
+  function focusOnPin(pin) {
+    globe.pointOfView({ lat: pin.lat, lng: pin.lng, altitude: 1.2 }, 1200);
+  }
+
+  function toggleHint() {
+    const hint = document.getElementById('hintToast');
+    if (state.pins.length > 0) hint.classList.add('hidden');
+    else hint.classList.remove('hidden');
+  }
+
+  function formatDate(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso + 'T00:00:00');
+    if (isNaN(d)) return iso;
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  }
+
+  function setText(id, val) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  }
+
+
+  /* ===================================================================
+     6. UI WIRING
+  =================================================================== */
+
+  // ---- Pin editor modal -------------------------------------------------
+
+  let selectedRating = 0;
+
+  function openPinEditor(pin, coord) {
+    const overlay = document.getElementById('pinModalOverlay');
+    const title = document.getElementById('modalTitle');
+    const sub = document.getElementById('modalSub');
+    const deleteBtn = document.getElementById('deletePinBtn');
+    const readout = document.getElementById('coordReadout');
+
+    if (pin) {
+      // editing an existing pin
+      state.editingId = pin.id;
+      state.pendingCoord = { lat: pin.lat, lng: pin.lng };
+      title.textContent = 'Edit Travel Pin';
+      sub.textContent = 'UPDATE THIS TRIP';
+      document.getElementById('fieldCity').value = pin.city || '';
+      document.getElementById('fieldCountry').value = pin.country || '';
+      document.getElementById('fieldDate').value = pin.date || '';
+      document.getElementById('fieldNotes').value = pin.notes || '';
+      selectedRating = pin.rating || 0;
+      deleteBtn.classList.remove('hidden-util');
+    } else {
+      // new pin from a globe click (or the + button with no coord yet)
+      state.editingId = null;
+      title.textContent = 'New Travel Pin';
+      sub.textContent = 'PLACE A MARKER ON YOUR MAP';
+      document.getElementById('fieldCity').value = '';
+      document.getElementById('fieldCountry').value = '';
+      document.getElementById('fieldDate').value = '';
+      document.getElementById('fieldNotes').value = '';
+      selectedRating = 0;
+      deleteBtn.classList.add('hidden-util');
+
+      if (coord) {
+        state.pendingCoord = coord;
+        const guess = countryAtPoint(coord.lat, coord.lng);
+        if (guess) document.getElementById('fieldCountry').value = guess;
+      }
+    }
+
+    if (state.pendingCoord) {
+      readout.textContent = `lat ${state.pendingCoord.lat.toFixed(4)}, lng ${state.pendingCoord.lng.toFixed(4)}`;
+    } else {
+      readout.textContent = 'click the + button, then place your pin on the globe';
+    }
+
+    renderStarPicker();
+    overlay.classList.add('open');
+    setTimeout(() => document.getElementById('fieldCity').focus(), 200);
+
+    // Freeze the camera while the editor is open — otherwise auto-rotate
+    // keeps moving in the background and the coordinate shown in the
+    // readout could become stale by the time the person hits Save.
+    if (globe) globe.controls().autoRotate = false;
+  }
+
+  function closePinEditor() {
+    document.getElementById('pinModalOverlay').classList.remove('open');
+    state.pendingCoord = null;
+    state.editingId = null;
+
+    // restore whatever auto-rotate setting the person actually has on
+    if (globe) globe.controls().autoRotate = state.autoRotate;
+  }
+
+  function renderStarPicker() {
+    document.querySelectorAll('#starPicker .star').forEach(star => {
+      const val = parseInt(star.dataset.val, 10);
+      star.classList.toggle('filled', val <= selectedRating);
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('starPicker').addEventListener('click', e => {
+      if (!e.target.classList.contains('star')) return;
+      selectedRating = parseInt(e.target.dataset.val, 10);
+      renderStarPicker();
+    });
+  });
+
+  function handlePinFormSubmit(e) {
+    e.preventDefault();
+
+    const city = document.getElementById('fieldCity').value.trim();
+    const country = document.getElementById('fieldCountry').value.trim();
+    const date = document.getElementById('fieldDate').value;
+    const notes = document.getElementById('fieldNotes').value.trim();
+
+    if (!city || !country) {
+      flashToast('City and country are required.');
+      return;
+    }
+
+    if (state.editingId) {
+      // update existing pin in place
+      const pin = state.pins.find(p => p.id === state.editingId);
+      if (pin) {
+        pin.city = city; pin.country = country; pin.date = date;
+        pin.notes = notes; pin.rating = selectedRating;
+      }
+      flashToast('Trip updated ✓');
+    } else {
+      if (!state.pendingCoord) {
+        flashToast('Click a location on the globe first.');
+        return;
+      }
+      state.pins.push({
+        id: uid(),
+        lat: state.pendingCoord.lat,
+        lng: state.pendingCoord.lng,
+        city, country, date, notes,
+        rating: selectedRating
+      });
+      flashToast('Pin added to your map ✓');
+    }
+
+    savePins();
+    renderAll();
+    closePinEditor();
+  }
+
+  function handleDeletePin() {
+    if (!state.editingId) return;
+    state.pins = state.pins.filter(p => p.id !== state.editingId);
+    savePins();
+    renderAll();
+    closePinEditor();
+    flashToast('Trip removed');
+  }
+
+  // ---- "+" add button: lets the person place a pin without clicking
+  // the globe first — uses the independently-tracked camera position
+  // (see updateTrackedCameraLatLng in initGlobe), NOT globe.pointOfView()
+  // as a getter, which returned stale/default coordinates once the
+  // camera had auto-rotated away from its initial position. -------------
+  function handleAddPinButton() {
+    const lat = state.trackedCameraLat ?? 0;
+    const lng = state.trackedCameraLng ?? 0;
+    openPinEditor(null, { lat, lng });
+  }
+
+  // ---- Search (cities + countries across logged pins, plus a basic
+  // gazetteer fallback for navigating anywhere even before pins exist) --
+
+  // Small curated gazetteer so search is useful on a blank globe too.
+  const GAZETTEER = [
+    {city:'New York', country:'United States of America', lat:40.7128, lng:-74.0060},
+    {city:'Panama City', country:'Panama', lat:8.9824, lng:-79.5199},
+    {city:'Medellín', country:'Colombia', lat:6.2442, lng:-75.5812},
+    {city:'Bogotá', country:'Colombia', lat:4.7110, lng:-74.0721},
+    {city:'Santiago', country:'Chile', lat:-33.4489, lng:-70.6693},
+    {city:'Lisbon', country:'Portugal', lat:38.7223, lng:-9.1393},
+    {city:'Paris', country:'France', lat:48.8566, lng:2.3522},
+    {city:'Amsterdam', country:'Netherlands', lat:52.3676, lng:4.9041},
+    {city:'Berlin', country:'Germany', lat:52.5200, lng:13.4050},
+    {city:'Tokyo', country:'Japan', lat:35.6762, lng:139.6503},
+    {city:'Rome', country:'Italy', lat:41.9028, lng:12.4964},
+    {city:'Barcelona', country:'Spain', lat:41.3851, lng:2.1734},
+    {city:'London', country:'United Kingdom', lat:51.5072, lng:-0.1276},
+    {city:'Dubai', country:'United Arab Emirates', lat:25.2048, lng:55.2708},
+    {city:'Bangkok', country:'Thailand', lat:13.7563, lng:100.5018},
+    {city:'Cape Town', country:'South Africa', lat:-33.9249, lng:18.4241},
+    {city:'Sydney', country:'Australia', lat:-33.8688, lng:151.2093},
+    {city:'Mexico City', country:'Mexico', lat:19.4326, lng:-99.1332},
+    {city:'Rio de Janeiro', country:'Brazil', lat:-22.9068, lng:-43.1729},
+    {city:'Seoul', country:'South Korea', lat:37.5665, lng:126.9780}
+  ];
+
+  function runSearch(query) {
+    const resultsEl = document.getElementById('searchResults');
+    const q = query.trim().toLowerCase();
+    if (q.length < 1) { resultsEl.classList.remove('open'); return; }
+
+    const fromPins = state.pins
+      .filter(p => p.city.toLowerCase().includes(q) || p.country.toLowerCase().includes(q))
+      .map(p => ({ city: p.city, country: p.country, lat: p.lat, lng: p.lng, tag: 'Your Trip', pinId: p.id }));
+
+    const fromGazetteer = GAZETTEER
+      .filter(g => g.city.toLowerCase().includes(q) || g.country.toLowerCase().includes(q))
+      .map(g => ({ ...g, tag: 'Place' }));
+
+    const merged = [...fromPins, ...fromGazetteer].slice(0, 8);
+
+    if (merged.length === 0) {
+      resultsEl.innerHTML = `<div class="search-result-item" style="color:var(--text-faint);cursor:default;">No matches</div>`;
+      resultsEl.classList.add('open');
+      return;
+    }
+
+    resultsEl.innerHTML = merged.map((r, i) => `
+      <div class="search-result-item" data-idx="${i}">
+        <span>${escapeHtml(r.city)}, ${escapeHtml(r.country)}</span>
+        <span class="tag">${r.tag}</span>
+      </div>
+    `).join('');
+    resultsEl.classList.add('open');
+
+    resultsEl.querySelectorAll('.search-result-item').forEach((item, i) => {
+      if (!merged[i]) return;
+      item.addEventListener('click', () => {
+        const r = merged[i];
+        globe.pointOfView({ lat: r.lat, lng: r.lng, altitude: 1.4 }, 1200);
+        resultsEl.classList.remove('open');
+        document.getElementById('searchInput').value = `${r.city}, ${r.country}`;
+        if (r.pinId) {
+          const pin = state.pins.find(p => p.id === r.pinId);
+          if (pin) setTimeout(() => openPinEditor(pin), 1300);
+        }
+      });
+    });
+  }
+
+  // ---- Right-dock toggles ------------------------------------------------
+
+  function wireSwitch(toggleId, switchId, stateKey, onChange) {
+    const toggle = document.getElementById(toggleId);
+    toggle.addEventListener('click', () => {
+      state[stateKey] = !state[stateKey];
+      document.getElementById(switchId).classList.toggle('on', state[stateKey]);
+      onChange();
+    });
+  }
+
+  // ---- Timeline drawer ---------------------------------------------------
+
+  function openDrawer() {
+    document.getElementById('drawerOverlay').classList.add('open');
+    document.getElementById('drawer').classList.add('open');
+    renderTimelineDrawer();
+  }
+  function closeDrawer() {
+    document.getElementById('drawerOverlay').classList.remove('open');
+    document.getElementById('drawer').classList.remove('open');
+  }
+
+  // ---- Theme toggle -------------------------------------------------------
+
+  function applyTheme(theme) {
+    state.theme = theme;
+    document.documentElement.setAttribute('data-theme', theme);
+    document.getElementById('themeBtn').textContent = theme === 'dark' ? '🌙' : '☀️';
+    saveTheme(theme);
+  }
+
+  // ---- Export / Import ----------------------------------------------------
+
+  function exportData() {
+    const payload = { version: 1, exportedAt: new Date().toISOString(), pins: state.pins };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `atlas-travel-backup-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    flashToast('Backup exported ✓');
+  }
+
+  function importData(file) {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const parsed = JSON.parse(e.target.result);
+        const incoming = Array.isArray(parsed.pins) ? parsed.pins : [];
+        if (incoming.length === 0) { flashToast('No trips found in that file.'); return; }
+        // merge, de-duping by id
+        const existingIds = new Set(state.pins.map(p => p.id));
+        const merged = [...state.pins, ...incoming.filter(p => !existingIds.has(p.id))];
+        state.pins = merged;
+        savePins();
+        renderAll();
+        flashToast(`Imported ${incoming.length} trip(s) ✓`);
+        document.getElementById('dataModalOverlay').classList.remove('open');
+      } catch (err) {
+        flashToast('That file could not be read.');
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  // ---- Toast ---------------------------------------------------------------
+
+  let toastTimer;
+  function flashToast(msg) {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 2400);
+  }
+
+
+  /* ===================================================================
+     7. BOOTSTRAP
+  =================================================================== */
+
+  function wireUI() {
+    // Pin modal
+    document.getElementById('pinForm').addEventListener('submit', handlePinFormSubmit);
+    document.getElementById('modalClose').addEventListener('click', closePinEditor);
+    document.getElementById('cancelPinBtn').addEventListener('click', closePinEditor);
+    document.getElementById('deletePinBtn').addEventListener('click', handleDeletePin);
+    document.getElementById('pinModalOverlay').addEventListener('click', e => {
+      if (e.target.id === 'pinModalOverlay') closePinEditor();
+    });
+    document.getElementById('addPinBtn').addEventListener('click', handleAddPinButton);
+
+    // Search
+    const searchInput = document.getElementById('searchInput');
+    searchInput.addEventListener('input', e => runSearch(e.target.value));
+    searchInput.addEventListener('focus', e => { if (e.target.value) runSearch(e.target.value); });
+    document.addEventListener('click', e => {
+      if (!e.target.closest('.search-wrap')) document.getElementById('searchResults').classList.remove('open');
+    });
+
+    // Right dock toggles
+    wireSwitch('toggleVisited', 'switchVisited', 'showVisited', renderGlobeLayers);
+    wireSwitch('toggleArcs', 'switchArcs', 'showArcs', renderGlobeLayers);
+    wireSwitch('toggleAutorotate', 'switchAutorotate', 'autoRotate', () => {
+      globe.controls().autoRotate = state.autoRotate;
+    });
+
+    // Timeline drawer
+    document.getElementById('timelineBtn').addEventListener('click', openDrawer);
+    document.getElementById('drawerOverlay').addEventListener('click', closeDrawer);
+    document.querySelectorAll('.sort-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.sortMode = btn.dataset.sort;
+        renderTimelineDrawer();
+      });
+    });
+
+    // Theme
+    document.getElementById('themeBtn').addEventListener('click', () => {
+      applyTheme(state.theme === 'dark' ? 'light' : 'dark');
+    });
+
+    // Data import/export modal
+    document.getElementById('dataBtn').addEventListener('click', () => {
+      document.getElementById('dataModalOverlay').classList.add('open');
+    });
+    document.getElementById('dataModalClose').addEventListener('click', () => {
+      document.getElementById('dataModalOverlay').classList.remove('open');
+    });
+    document.getElementById('dataModalOverlay').addEventListener('click', e => {
+      if (e.target.id === 'dataModalOverlay') e.currentTarget.classList.remove('open');
+    });
+    document.getElementById('exportBtn').addEventListener('click', exportData);
+    document.getElementById('importBtn').addEventListener('click', () => {
+      document.getElementById('importFileInput').click();
+    });
+    document.getElementById('importFileInput').addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (file) importData(file);
+      e.target.value = '';
+    });
+
+    // Esc closes whatever's open
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      closePinEditor();
+      closeDrawer();
+      document.getElementById('dataModalOverlay').classList.remove('open');
+    });
+  }
+
+  async function boot() {
+    document.getElementById('loadErrorRetry')?.addEventListener('click', () => {
+      hideLoadError();
+      boot();
+    });
+
+    try {
+      await loadAllLibraries();
+    } catch (err) {
+      console.error('Atlas: library load failure —', err);
+      showLoadError(
+        `${err.message} — check your internet connection, or that unpkg.com / jsdelivr.net aren't blocked, then retry.`
+      );
+      return; // do not proceed to globe init without the libraries
+    }
+
+    hideLoadError();
+
+    try {
+      state.pins = loadPins();
+      applyTheme(loadTheme());
+      wireUI();
+      await initGlobe();
+    } catch (err) {
+      console.error('Atlas: failed to initialize globe —', err);
+      showLoadError(`The globe failed to initialize: ${err.message}`);
+    }
+  }
+
+  boot();
+
+})();
+
+</script>
+</body>
+</html>
