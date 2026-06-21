@@ -534,12 +534,10 @@ body::before{
   .trip-chip{ min-width:90px; }
   .modal{ max-width: calc(100% - 24px); }
   .field-row{ grid-template-columns:1fr 1fr; }
-  #nameTitle{ top:170px; }
 }
 @media (max-width: 420px){
   .stat-num{ font-size:20px; }
   .add-pin-btn{ width:40px; height:40px; }
-  #nameTitle h2{ font-size:16px; letter-spacing:2px; }
 }
 
 /* reduced motion respect */
@@ -557,26 +555,6 @@ body::before{
      globe.gl injects its three.js renderer/canvas into this div.
 ============================================================= -->
 <div id="globeViz"></div>
-
-<!-- ============================================================
-     PERSONAL NAME TITLE — sits above the globe, purely decorative.
-     pointer-events:none so it never blocks clicking/dragging the
-     globe underneath it; z-index sits above the canvas, below the
-     topbar/dashboard/modals.
-============================================================= -->
-<div id="nameTitle" style="
-  position:fixed; top:120px; left:50%; transform:translateX(-50%);
-  z-index:10; pointer-events:none; text-align:center; width:100%;
-  padding:0 16px;
-">
-  <h2 style="
-    margin:0; font-family:'Orbitron',sans-serif; font-weight:900;
-    font-size:clamp(20px, 4.5vw, 48px); letter-spacing:4px;
-    color:#f4d35e; white-space:nowrap;
-    text-shadow: 0 0 24px rgba(212,175,55,0.45), 0 0 60px rgba(212,175,55,0.2);
-    -webkit-text-stroke: 1px rgba(212,175,55,0.3);
-  ">🦂 DJEFF MERZIER 🦂</h2>
-</div>
 
 <!-- ============================================================
      LOAD ERROR PANEL — hidden by default, shown by JS if a required
